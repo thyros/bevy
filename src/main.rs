@@ -1,5 +1,8 @@
+use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::{math::Vec3, math::Vec3Swizzles, prelude::*};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_prototype_debug_lines::*;
+use rand::Rng;
 
 mod enemy;
 mod player;
@@ -7,6 +10,9 @@ mod player;
 pub const CLEAR: Color = Color::rgb(0.1, 0.5, 1.0);
 pub const RESOLUTION: f32 = 16.0 / 9.0;
 const TIME_STEP: f32 = 1.0 / 60.0;
+const ENEMIES_COUNT: i32 = 100;
+pub const HEIGHT: f32 = 900.0;
+pub const WIDTH: f32 = HEIGHT * RESOLUTION;
 
 #[derive(Component)]
 struct AnimationTimer {
@@ -15,24 +21,20 @@ struct AnimationTimer {
     max_sprite: usize,
 }
 
-/// rotate to face player ship behavior
 #[derive(Component)]
-struct RotateToPlayer {
-    /// rotation speed in radians per second
-    rotation_speed: f32,
+struct GunTimer {
+    timer: Timer,
 }
 
 #[derive(Resource, Deref)]
 struct CharacterSheet(Handle<TextureAtlas>);
 
 fn main() {
-    let height: f32 = 900.0;
-
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             window: WindowDescriptor {
-                width: height * RESOLUTION,
-                height: height,
+                width: WIDTH,
+                height: HEIGHT,
                 title: "My-Bevy".to_owned(),
                 present_mode: bevy::window::PresentMode::AutoVsync,
                 resizable: false,
@@ -41,17 +43,60 @@ fn main() {
             ..Default::default()
         }))
         .add_plugin(WorldInspectorPlugin)
+        .add_plugin(LogDiagnosticsPlugin::default())
+        .add_plugin(FrameTimeDiagnosticsPlugin::default())
+        .add_plugin(DebugLinesPlugin::default())
         .add_startup_system_to_stage(StartupStage::PreStartup, setup)
         .add_startup_system(spawn_player)
         .add_startup_system(spawn_enemy)
         .add_system(animate_sprite)
-        .add_system(rotate_to_player_system)
+        //        .add_system(rotate_to_player_system)
         .add_system(player::player_movement_system)
+        .add_system(shoot_system)
+        .add_system(bevy::window::close_on_esc)
         .run();
 }
 
+fn find_closest(
+    query: &Query<(Entity, &enemy::Enemy, &Transform), Without<GunTimer>>,
+    pos: Vec3,
+    max_dist: f32,
+) -> Option<(Entity, Transform)> {
+    let mut min: f32 = 5000.0;
+    let mut closest: Option<(Entity, Transform)> = None;
+
+    for (entity, enemy, transform) in query.iter() {
+        let distance = (pos - transform.translation).length();
+        if distance < min && distance < max_dist {
+            min = distance;
+            closest = Some((entity, *transform));
+        }
+    }
+    return closest;
+}
+
+fn shoot_system(
+    mut commands: Commands,
+    mut lines: ResMut<DebugLines>,
+    time: Res<Time>,
+    query: Query<(Entity, &enemy::Enemy, &Transform), Without<GunTimer>>,
+    mut shoot_query: Query<(&mut GunTimer, &Transform)>,
+) {
+    for (mut guntimer, guntransform) in &mut shoot_query {
+        guntimer.timer.tick(time.delta());
+        if guntimer.timer.just_finished() {
+            println!("Ticked");
+            let closest = find_closest(&query, guntransform.translation, 250.0);
+            if let Some((e, t)) = closest {
+                lines.line(guntransform.translation, t.translation, 0.1);
+                commands.entity(e).despawn();
+            }
+        }
+    }
+}
+
 fn rotate_to_player_system(
-    mut query: Query<(&RotateToPlayer, &mut Transform), Without<player::Player>>,
+    mut query: Query<(&enemy::Enemy, &mut Transform), Without<player::Player>>,
     player_query: Query<&Transform, With<player::Player>>,
 ) {
     let player_transform = player_query.single();
@@ -99,6 +144,10 @@ fn rotate_to_player_system(
 
         // rotate the enemy to face the player
         enemy_transform.rotate_z(rotation_angle);
+
+        let delta = config.movement_speed * TIME_STEP;
+        let step: Vec3 = Vec3::new(enemy_forward.x * delta, enemy_forward.y * delta, 0.0);
+        enemy_transform.translation += step;
     }
 }
 
@@ -112,10 +161,6 @@ fn animate_sprite(
     )>,
 ) {
     for (mut timer, mut sprite, texture_atlas_handle) in &mut query {
-        // if sprite.index < timer.min_sprite {
-        //     sprite.index = timer.min_sprite;
-        // }
-
         timer.timer.tick(time.delta());
         if timer.timer.just_finished() {
             let texture_atlas = texture_atlases.get(texture_atlas_handle).unwrap();
@@ -153,6 +198,9 @@ fn spawn_player(mut commands: Commands, texture_atlas_handle: Res<CharacterSheet
             min_sprite: 0,
             max_sprite: 2,
         },
+        GunTimer {
+            timer: Timer::from_seconds(0.2, TimerMode::Repeating),
+        },
         player::Player {
             movement_speed: 500.0,
         },
@@ -160,23 +208,36 @@ fn spawn_player(mut commands: Commands, texture_atlas_handle: Res<CharacterSheet
 }
 
 fn spawn_enemy(mut commands: Commands, texture_atlas_handle: Res<CharacterSheet>) {
-    commands.spawn((
-        SpriteSheetBundle {
-            texture_atlas: texture_atlas_handle.0.clone(),
-            transform: Transform {
-                translation: Vec3::new(50.0, 0.0, 0.0),
+    let maxx: i32 = (WIDTH / 2.0) as i32;
+    let minx: i32 = -maxx;
+    let maxy: i32 = (HEIGHT / 2.0) as i32;
+    let miny: i32 = -maxy;
+
+    for _i in 0..ENEMIES_COUNT {
+        let position: Vec3 = Vec3::new(
+            rand::thread_rng().gen_range(minx..maxx) as f32,
+            rand::thread_rng().gen_range(miny..maxy) as f32,
+            0.0,
+        );
+
+        commands.spawn((
+            SpriteSheetBundle {
+                texture_atlas: texture_atlas_handle.0.clone(),
+                transform: Transform {
+                    translation: position,
+                    ..default()
+                },
                 ..default()
             },
-            ..default()
-        },
-        AnimationTimer {
-            timer: Timer::from_seconds(0.1, TimerMode::Repeating),
-            min_sprite: 3,
-            max_sprite: 5,
-        },
-        enemy::Enemy {},
-        RotateToPlayer {
-            rotation_speed: f32::to_radians(90.0), // degrees per second
-        },
-    ));
+            AnimationTimer {
+                timer: Timer::from_seconds(0.1, TimerMode::Repeating),
+                min_sprite: 3,
+                max_sprite: 5,
+            },
+            enemy::Enemy {
+                rotation_speed: f32::to_radians(90.0), // degrees per second
+                movement_speed: 100.0,
+            },
+        ));
+    }
 }
